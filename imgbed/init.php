@@ -81,6 +81,73 @@ if (!is_dir($datePath)) {
     echo "已存在\n";
 }
 
+// 错误显示设置
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+
+// 设置时区
+date_default_timezone_set('Asia/Shanghai');
+
+// 会话配置
+if (session_status() === PHP_SESSION_NONE) {
+    session_save_path(__DIR__ . '/tmp');
+    ini_set('session.gc_maxlifetime', 3600); // 设置会话过期时间为1小时
+    ini_set('session.cookie_httponly', 1); // 提高安全性，防止XSS获取cookie
+    ini_set('session.use_strict_mode', 1); // 提高安全性，防止会话固定攻击
+    ini_set('session.use_only_cookies', 1); // 只使用cookie存储会话ID
+    ini_set('session.sid_length', 48); // 增加会话ID长度
+}
+
+// 创建临时目录用于会话存储（如果不存在）
+if (!is_dir(__DIR__ . '/tmp')) {
+    mkdir(__DIR__ . '/tmp', 0755, true);
+}
+
+// 配置文件路径
+$config_file = __DIR__ . '/config/config.php';
+
+// 加载配置
+if (file_exists($config_file)) {
+    $config = require $config_file;
+} else {
+    // 在安装前，某些配置可能尚不存在，提供默认值以避免错误
+    $config = [
+        'site' => ['base_url' => ''],
+        'upload' => [], 'expiration' => [], 'admin' => [], 'db' => []
+    ];
+}
+
+// 设置自动加载
+require_once __DIR__ . '/src/Autoloader.php';
+\ImgBed\Autoloader::register();
+
+// 设置网站基础URL（如果配置中未指定）
+if (empty($config['site']['base_url'])) {
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443) ? 'https://' : 'http://';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $script_name = $_SERVER['SCRIPT_NAME'];
+    $path = rtrim(dirname($script_name), '/\\');
+
+    // 如果应用在子目录，则包含子目录路径
+    if ($path === '/' || $path === '') {
+        $config['site']['base_url'] = $protocol . $host;
+    } else {
+        $config['site']['base_url'] = $protocol . $host . $path;
+    }
+}
+
+// 定义一个简单的XSS过滤函数
+function xss_clean($data) {
+    if (is_array($data)) {
+        foreach ($data as $key => $value) {
+            $data[$key] = xss_clean($value);
+        }
+    } else {
+        $data = htmlspecialchars((string)$data, ENT_QUOTES, 'UTF-8');
+    }
+    return $data;
+}
+
 echo "\n初始化完成！\n";
 echo "现在，您可以通过访问 /install 页面完成数据库配置。\n";
 echo "或者手动编辑 config/config.php 文件设置数据库信息。\n\n";

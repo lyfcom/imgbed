@@ -5,9 +5,9 @@ class MediaHandler {
     private $db;
     private $config;
     
-    public function __construct() {
+    public function __construct($config) {
         $this->db = Database::getInstance();
-        $this->config = require __DIR__ . '/../config/config.php';
+        $this->config = $config;
     }
     
     /**
@@ -68,7 +68,7 @@ class MediaHandler {
             'id' => $fileId,
             'filename' => $file['name'],
             'filepath' => $relativePath,
-            'filetype' => $file['type'],
+            'filetype' => $actualMimeType,
             'filesize' => $file['size'],
             'filehash' => $fileHash,
             'type' => $fileType,
@@ -95,7 +95,7 @@ class MediaHandler {
         } catch (\Exception $e) {
             // 如果数据库操作失败，删除已上传的文件
             @unlink($filePath);
-            return ['error' => '保存文件信息失败'];
+            return ['error' => '保存文件信息失败: ' . $e->getMessage()];
         }
     }
     
@@ -111,16 +111,24 @@ class MediaHandler {
         if (!$file) {
             return false;
         }
-        
-        // 更新访问计数和最后访问时间
-        $this->updateFileAccess($id);
-        
-        // 检查是否需要删除文件（访问次数达到上限）
-        if ($file['views'] + 1 >= $this->config['expiration']['max_views']) {
-            // 标记为删除状态，但此处不实际删除文件，由定时任务处理
-            $this->markFileDeleted($id);
+
+        // 如果不是永久缓存策略，才处理访问计数逻辑
+        if (($this->config['expiration']['expiration_policy'] ?? 'views') !== 'permanent') {
+            // 从配置中获取最大访问次数
+            $max_views = $this->config['expiration']['max_views'];
+
+            // 检查访问次数是否已达到或超过上限
+            if ($file['views'] >= $max_views) {
+                // 如果达到上限，立即删除文件和记录，然后返回false
+                $this->deleteFileAndRecord($file['id'], $file['filepath']);
+                return false;
+            }
+
+            // 如果未达到上限，则更新访问计数
+            $this->updateFileAccess($id);
         }
-        
+
+        // 返回文件信息，供本次查看
         return $file;
     }
     
@@ -141,16 +149,42 @@ class MediaHandler {
     }
     
     /**
-     * 标记文件为已删除状态
+     * 彻底删除文件（物理删除和数据库记录删除）
      * @param string $id 文件ID
+     * @param string $filepath 文件相对路径
+     * @return bool 删除是否成功
      */
-    private function markFileDeleted($id) {
-        $sql = "UPDATE {prefix}media SET deleted = 1 WHERE id = :id";
-        $this->db->query($sql, ['id' => $id]);
+    public function deleteFileAndRecord($id, $filepath) {
+        // 物理删除文件
+        $fullPath = $this->config['upload']['storage_path'] . $filepath;
+        $unlinked = false;
+
+        if (file_exists($fullPath)) {
+            if (@unlink($fullPath)) {
+                $unlinked = true;
+            }
+        } else {
+            // 如果文件本就不存在，也视为成功，以便删除数据库记录
+            $unlinked = true;
+        }
+        
+        // 仅在物理文件删除成功或文件本就不存在时，才删除数据库记录
+        if ($unlinked) {
+            $sql = "DELETE FROM {prefix}media WHERE id = :id";
+            try {
+                $this->db->query($sql, ['id' => $id]);
+                return true;
+            } catch (\Exception $e) {
+                // 可以记录日志
+                return false;
+            }
+        }
+        
+        return false;
     }
     
     /**
-     * 实际删除过期文件
+     * 清理并删除所有过期文件
      * 根据访问次数或上传日期清理文件
      */
     public function cleanupExpiredFiles() {
@@ -169,48 +203,26 @@ class MediaHandler {
         ]);
         
         // 逐个删除文件
+        $deletedCount = 0;
         foreach ($files as $file) {
-            // 标记为删除状态
-            $this->markFileDeleted($file['id']);
-            
-            // 物理删除文件
-            $filePath = $this->config['upload']['storage_path'] . $file['filepath'];
-            if (file_exists($filePath)) {
-                @unlink($filePath);
+            if ($this->deleteFileAndRecord($file['id'], $file['filepath'])) {
+                $deletedCount++;
             }
         }
         
-        return count($files);
-    }
-    
-    /**
-     * 删除已标记的文件
-     */
-    public function deleteMarkedFiles() {
-        $sql = "SELECT id, filepath FROM {prefix}media WHERE deleted = 1";
-        $files = $this->db->fetchAll($sql);
-        
-        foreach ($files as $file) {
-            $filePath = $this->config['upload']['storage_path'] . $file['filepath'];
-            if (file_exists($filePath)) {
-                @unlink($filePath);
-            }
-        }
-        
-        // 删除数据库记录
-        $this->db->query("DELETE FROM {prefix}media WHERE deleted = 1");
-        
-        return count($files);
+        return $deletedCount;
     }
     
     /**
      * 获取文件类型
      * @param string $extension 文件扩展名
+     * @param string $actualMimeType 真实的MIME类型
      * @return string|false 文件类型或false
      */
     private function getFileType($extension, $actualMimeType) {
         $isImageExtensionAllowed = in_array($extension, $this->config['upload']['allowed_image_types']);
         $isVideoExtensionAllowed = in_array($extension, $this->config['upload']['allowed_video_types']);
+        $isAudioExtensionAllowed = in_array($extension, $this->config['upload']['allowed_audio_types']);
 
         if ($isImageExtensionAllowed && str_starts_with($actualMimeType, 'image/')) {
             return 'image';
@@ -218,6 +230,10 @@ class MediaHandler {
         
         if ($isVideoExtensionAllowed && str_starts_with($actualMimeType, 'video/')) {
             return 'video';
+        }
+        
+        if ($isAudioExtensionAllowed && (str_starts_with($actualMimeType, 'audio/') || $actualMimeType === 'application/ogg')) {
+            return 'audio';
         }
         
         return false;
@@ -237,13 +253,12 @@ class MediaHandler {
      * @return string 格式化后的大小
      */
     private function formatFileSize($size) {
-        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        $i = 0;
-        while ($size >= 1024 && $i < count($units) - 1) {
-            $size /= 1024;
-            $i++;
+        if ($size < 1024) {
+            return $size . ' B';
         }
-        return round($size, 2) . ' ' . $units[$i];
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        $i = floor(log($size, 1024));
+        return @round($size / pow(1024, $i), 2) . ' ' . $units[$i];
     }
     
     /**
@@ -253,16 +268,16 @@ class MediaHandler {
      */
     private function getUploadErrorMessage($errorCode) {
         $errors = [
-            UPLOAD_ERR_INI_SIZE => '文件大小超过php.ini中upload_max_filesize的限制',
-            UPLOAD_ERR_FORM_SIZE => '文件大小超过表单中MAX_FILE_SIZE的限制',
+            UPLOAD_ERR_INI_SIZE => '文件大小超过php.ini中的upload_max_filesize限制',
+            UPLOAD_ERR_FORM_SIZE => '文件大小超过表单中的MAX_FILE_SIZE限制',
             UPLOAD_ERR_PARTIAL => '文件只有部分被上传',
             UPLOAD_ERR_NO_FILE => '没有文件被上传',
             UPLOAD_ERR_NO_TMP_DIR => '找不到临时文件夹',
             UPLOAD_ERR_CANT_WRITE => '文件写入失败',
-            UPLOAD_ERR_EXTENSION => '文件上传被PHP扩展停止',
+            UPLOAD_ERR_EXTENSION => '文件上传被PHP扩展停止'
         ];
         
-        return isset($errors[$errorCode]) ? $errors[$errorCode] : '未知上传错误';
+        return $errors[$errorCode] ?? '未知上传错误';
     }
     
     /**
@@ -271,8 +286,7 @@ class MediaHandler {
      * @return string 文件URL
      */
     public function getFileUrl($fileId) {
-        $baseUrl = $this->getBaseUrl();
-        return rtrim($baseUrl, '/') . "/file/{$fileId}";
+        return $this->getBaseUrl() . '/file/' . $fileId;
     }
     
     /**
@@ -280,20 +294,28 @@ class MediaHandler {
      * @return string 基础URL
      */
     private function getBaseUrl() {
-        if (!empty($this->config['site']['base_url'])) {
-            return $this->config['site']['base_url'];
+        return $this->config['site']['base_url'];
+    }
+
+    /**
+     * 删除所有本地存储的源文件，但保留数据库记录
+     * @return int 返回成功删除的文件数量
+     */
+    public function deleteAllLocalFiles() {
+        // 查找所有未被标记为删除的文件记录
+        $sql = "SELECT id, filepath FROM {prefix}media WHERE deleted = 0";
+        $files = $this->db->fetchAll($sql);
+
+        $deletedCount = 0;
+        foreach ($files as $file) {
+            $fullPath = $this->config['upload']['storage_path'] . $file['filepath'];
+            if (file_exists($fullPath)) {
+                if (@unlink($fullPath)) {
+                    $deletedCount++;
+                }
+            }
         }
         
-        $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'];
-        $scriptName = $_SERVER['SCRIPT_NAME'];
-        $path = dirname($scriptName);
-        
-        // 如果在根目录，返回域名
-        if ($path == '/' || $path == '\\') {
-            $path = '';
-        }
-        
-        return "{$protocol}://{$host}{$path}";
+        return $deletedCount;
     }
 } 

@@ -20,6 +20,7 @@ return [
         'max_size' => 52428800, // 最大上传大小 (50MB)
         'allowed_image_types' => ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'],
         'allowed_video_types' => ['mp4', 'webm', 'mov', 'avi', 'mkv'],
+        'allowed_audio_types' => ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a'],
         'storage_path' => __DIR__ . '/../uploads/', // 存储路径
     ],
     
@@ -28,11 +29,18 @@ return [
         'max_views' => 3,       // 访问超过3次自动删除
         'max_days' => 3,        // 保存超过3天自动删除
         'check_interval' => 3600, // 检查间隔(秒)
+        'expiration_policy' => 'views',
     ],
     
     // 网站设置
     'site' => [
         'title' => '简易图床',
         'base_url' => '', // 网站基础URL，留空则自动检测
+    ],
+
+    // 管理员设置
+    'admin' => [
+        'password' => 'admin123', // 管理员密码，建议修改为强密码
+        'session_expire' => 3600, // 会话过期时间（秒）
     ],
 ]; 
