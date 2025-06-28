@@ -58,7 +58,7 @@ if (isset($_SESSION['last_action_result'])) {
 // 处理删除操作
 $deletion_result = null;
 if ($is_authorized && isset($_POST['action'])) {
-    $mediaHandler = new \ImgBed\MediaHandler();
+    $mediaHandler = new \ImgBed\MediaHandler($config);
     
     if ($_POST['action'] === 'cleanup_expired') {
         // 清理并删除所有过期文件
